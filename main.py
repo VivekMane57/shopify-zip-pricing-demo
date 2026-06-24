@@ -2,7 +2,6 @@ import hmac
 import hashlib
 import os
 import time
-from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,7 +28,7 @@ app.add_middleware(
         "https://admin.shopify.com",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
@@ -56,16 +55,16 @@ def verify_rate_limit(ip: str):
     RATE_LIMIT[ip] = requests
 
 
-def verify_shopify_signature(query_params: dict):
-    signature = query_params.get("signature")
+def verify_shopify_hmac(query_params: dict):
+    received_hmac = query_params.get("hmac")
 
-    if not signature:
-        raise HTTPException(status_code=401, detail="Missing Shopify signature")
+    if not received_hmac:
+        raise HTTPException(status_code=401, detail="Missing Shopify HMAC")
 
     params = {
         key: value
         for key, value in query_params.items()
-        if key not in ["signature", "hmac"]
+        if key not in ["hmac", "signature"]
     }
 
     message = "&".join(
@@ -73,25 +72,24 @@ def verify_shopify_signature(query_params: dict):
         for key in sorted(params.keys())
     )
 
-    calculated_signature = hmac.new(
+    calculated_hmac = hmac.new(
         SHOPIFY_API_SECRET.encode("utf-8"),
         message.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
 
-    if not hmac.compare_digest(calculated_signature, signature):
-        raise HTTPException(status_code=401, detail="Invalid Shopify signature")
+    if not hmac.compare_digest(calculated_hmac, received_hmac):
+        raise HTTPException(status_code=401, detail="Invalid Shopify HMAC")
 
 
 @app.get("/apps/zip-pricing/check-price")
 async def check_price_proxy(request: Request):
-    client_ip = request.client.host
+    client_ip = request.client.host if request.client else "unknown"
     verify_rate_limit(client_ip)
 
     query_params = dict(request.query_params)
 
-    # Shopify App Proxy security check
-    verify_shopify_signature(query_params)
+    verify_shopify_hmac(query_params)
 
     zip_code = query_params.get("zip_code", "").strip()
     product_id = query_params.get("product_id", "")
