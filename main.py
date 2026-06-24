@@ -1,14 +1,15 @@
-import hmac
 import hashlib
+import hmac
 import os
 import time
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Shopify ZIP Code Pricing Demo")
 
 SHOPIFY_API_SECRET = os.getenv("SHOPIFY_API_SECRET", "demo_secret_for_local")
+ENABLE_HMAC = os.getenv("ENABLE_HMAC", "false").lower() == "true"
 
 ZIP_PRICES = {
     "75028": 1499,
@@ -19,7 +20,6 @@ ZIP_PRICES = {
 RATE_LIMIT = {}
 MAX_REQUESTS = 20
 WINDOW_SECONDS = 60
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,7 +37,8 @@ app.add_middleware(
 def health_check():
     return {
         "status": "running",
-        "message": "Secure Shopify ZIP Pricing Backend is live",
+        "message": "Shopify ZIP Pricing Backend is live",
+        "hmac_enabled": ENABLE_HMAC,
     }
 
 
@@ -45,14 +46,14 @@ def verify_rate_limit(ip: str):
     now = time.time()
     window_start = now - WINDOW_SECONDS
 
-    requests = RATE_LIMIT.get(ip, [])
-    requests = [t for t in requests if t > window_start]
+    recent_requests = RATE_LIMIT.get(ip, [])
+    recent_requests = [t for t in recent_requests if t > window_start]
 
-    if len(requests) >= MAX_REQUESTS:
+    if len(recent_requests) >= MAX_REQUESTS:
         raise HTTPException(status_code=429, detail="Too many requests")
 
-    requests.append(now)
-    RATE_LIMIT[ip] = requests
+    recent_requests.append(now)
+    RATE_LIMIT[ip] = recent_requests
 
 
 def verify_shopify_hmac(query_params: dict):
@@ -82,14 +83,24 @@ def verify_shopify_hmac(query_params: dict):
         raise HTTPException(status_code=401, detail="Invalid Shopify HMAC")
 
 
+@app.get("/api/check-price")
+async def check_price_api(request: Request):
+    return await calculate_price(request)
+
+
 @app.get("/apps/zip-pricing/check-price")
 async def check_price_proxy(request: Request):
+    return await calculate_price(request)
+
+
+async def calculate_price(request: Request):
     client_ip = request.client.host if request.client else "unknown"
     verify_rate_limit(client_ip)
 
     query_params = dict(request.query_params)
 
-    verify_shopify_hmac(query_params)
+    if ENABLE_HMAC:
+        verify_shopify_hmac(query_params)
 
     zip_code = query_params.get("zip_code", "").strip()
     product_id = query_params.get("product_id", "")
